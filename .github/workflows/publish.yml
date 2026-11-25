@@ -1,0 +1,54 @@
+# Publishes the version c2ly.cloud serves as a release of this repository, once.
+# It runs by itself on a schedule, so a release is made by github-actions[bot] and
+# names no person. Each installer is checked against the manifest's SHA-256 before
+# it is published; the manifest and its signature go with it (the app checks that
+# signature before it updates itself).
+name: Publish the latest version
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+permissions:
+  contents: write
+concurrency: publish
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Publish what c2ly.cloud serves, if it is new
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BASE: https://c2ly.cloud/downloads
+        run: |
+          set -euo pipefail
+          mkdir out && cd out
+          curl -fsSL "$BASE/manifest.json" -o manifest.json
+          curl -fsSL "$BASE/manifest.json.sig" -o manifest.json.sig
+          v=$(jq -r .version manifest.json)
+          case "$v" in *[!0-9.]*|'') echo "unexpected version: $v"; exit 1 ;; esac
+          if gh release view "v$v" >/dev/null 2>&1; then echo "v$v is already published"; exit 0; fi
+          jq -r '.artifacts[] | .url + " " + .sha256' manifest.json > list
+          while read -r url sum; do
+            case "$url" in "$BASE"/C2-Cloud-"$v"-*) ;; *) echo "unexpected URL: $url"; exit 1 ;; esac
+            f=$(basename "$url")
+            curl -fsSL "$url" -o "$f"
+            echo "$sum  $f" | sha256sum -c -
+          done < list
+          # The Debian package is on the download page, not in the manifest.
+          curl -fsSL "$BASE/C2-Cloud-$v-amd64.deb" -o "C2-Cloud-$v-amd64.deb" || rm -f "C2-Cloud-$v-amd64.deb"
+          # The same files without the version, for links that never change:
+          # releases/latest/download/C2-Cloud-setup.exe and so on.
+          for f in C2-Cloud-"$v"-*; do cp "$f" "${f/-$v/}"; done
+          sha256sum C2-Cloud-* > SHA256SUMS.txt
+          notes=$(jq -r '.notes // ""' manifest.json)
+          {
+            echo "C2 Cloud $v${notes:+ — $notes}"
+            echo
+            echo 'Download for your system: macOS (Apple silicon) `C2-Cloud-mac.zip`, Windows `C2-Cloud-setup.exe`, Debian/Ubuntu `C2-Cloud-amd64.deb`, other Linux `C2-Cloud-x86_64.AppImage` (the same files with the version in their names are here too). SHA-256 of every file: `SHA256SUMS.txt`; `manifest.json` and its signature are what the app checks before updating itself.'
+            echo
+            echo 'You need a C2 Cloud plan and your own Claude Pro or Max subscription: https://c2ly.cloud'
+            echo
+            echo '下载：macOS 选 C2-Cloud-mac.zip，Windows 选 C2-Cloud-setup.exe，Debian/Ubuntu 选 .deb，其他 Linux 选 .AppImage。需要 C2 Cloud 套餐和你自己的 Claude Pro 或 Max 订阅。'
+          } > notes.md
+          gh release create "v$v" C2-Cloud-* manifest.json manifest.json.sig SHA256SUMS.txt --title "C2 Cloud $v" --notes-file notes.md --latest
